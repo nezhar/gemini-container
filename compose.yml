@@ -1,0 +1,4 @@
+services:
+  gemini-cli:
+    build: .
+    image: gemini-container
