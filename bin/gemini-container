@@ -1,0 +1,491 @@
+#!/bin/bash
+
+# Gemini Container - A containerized Gemini CLI environment
+# Based on the claude-container project architecture
+
+set -e
+
+VERSION="0.1.0"
+SCRIPT_NAME="gemini-container"
+
+# Default values
+WORKSPACE_DIR="$(pwd)"
+CONFIG_DIR="${HOME}/.config/gemini-container"
+USE_PROXY=false
+USE_DATASETTE=false
+PROXY_PORT=8080
+DATASETTE_PORT=8001
+
+# Docker image names (using script version)
+GEMINI_IMAGE="nezhar/gemini-container:${VERSION}"
+PROXY_IMAGE="nezhar/gemini-proxy:${VERSION}"
+DATASETTE_IMAGE="nezhar/gemini-datasette:${VERSION}"
+
+# Container and network names
+NETWORK_NAME="gemini-network"
+PROXY_CONTAINER_NAME="gemini-proxy"
+DATASETTE_CONTAINER_NAME="gemini-datasette"
+
+# Configuration subdirectories
+GEMINI_CONFIG_DIR="${CONFIG_DIR}/config"
+PROXY_DATA_DIR="${CONFIG_DIR}/proxy"
+
+# Color codes for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Show help message
+show_help() {
+    cat << EOF
+${SCRIPT_NAME} v${VERSION} - Containerized Gemini CLI Agent
+
+Usage: ${SCRIPT_NAME} [OPTIONS]
+
+Options:
+  -h, --help              Show this help message
+  -v, --version           Show version information
+  -w, --workspace DIR     Set workspace directory (default: current directory)
+  -c, --config DIR        Set config directory (default: ~/.config/gemini-container)
+  --proxy                 Enable API logging proxy
+  --datasette             Enable Datasette web interface (requires --proxy)
+  --proxy-port PORT       Set proxy port (default: 8080)
+  --datasette-port PORT   Set Datasette port (default: 8001)
+  --stop-proxy            Stop the proxy container
+  --stop-datasette        Stop the Datasette container
+  --cleanup               Stop and remove all containers and network
+
+Environment Variables:
+  GEMINI_API_KEY         Use API key authentication instead of OAuth
+
+Configuration:
+  Base directory: ${CONFIG_DIR}
+  Gemini config: ${CONFIG_DIR}/config
+  Proxy data: ${CONFIG_DIR}/proxy
+  Workspace: /workspace (in container)
+
+Examples:
+  # Start Gemini agent
+  ${SCRIPT_NAME}
+
+  # Start with API logging enabled
+  ${SCRIPT_NAME} --proxy --datasette
+
+  # Use specific workspace
+  ${SCRIPT_NAME} -w /path/to/project
+
+  # Use API key authentication
+  GEMINI_API_KEY=your-key ${SCRIPT_NAME}
+
+  # Stop proxy and datasette
+  ${SCRIPT_NAME} --stop-proxy --stop-datasette
+
+EOF
+}
+
+# Show version
+show_version() {
+    echo "${SCRIPT_NAME} version ${VERSION}"
+}
+
+# Print colored message
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Check if Docker is available
+check_docker() {
+    if ! command -v docker &> /dev/null; then
+        print_error "Docker is not installed or not in PATH"
+        exit 1
+    fi
+}
+
+# Initialize credentials if they don't exist
+initialize_credentials() {
+    # Create config directory if it doesn't exist
+    mkdir -p "$GEMINI_CONFIG_DIR"
+
+    local needs_setup=false
+
+    # Check if credentials files exist
+    if [ ! -f "$GEMINI_CONFIG_DIR/google_accounts.json" ]; then
+        # Try to find template files in repository
+        local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+        if [ -f "$script_dir/auth/google_accounts.json" ]; then
+            # Copy template files from repository
+            cp "$script_dir/auth/google_accounts.json" "$GEMINI_CONFIG_DIR/"
+            cp "$script_dir/auth/settings.json" "$GEMINI_CONFIG_DIR/"
+            print_info "Initialized credential templates in $GEMINI_CONFIG_DIR"
+            needs_setup=true
+        else
+            # Create minimal template files
+            echo '{"active":null,"old":[]}' > "$GEMINI_CONFIG_DIR/google_accounts.json"
+            echo '{"security":{"auth":{"selectedType":"oauth-personal"}}}' > "$GEMINI_CONFIG_DIR/settings.json"
+            print_info "Created credential templates in $GEMINI_CONFIG_DIR"
+            needs_setup=true
+        fi
+    fi
+
+    # Check if user needs to authenticate
+    if [ "$needs_setup" = true ] || [ "$(cat "$GEMINI_CONFIG_DIR/google_accounts.json" | grep -c '"active":null')" -gt 0 ]; then
+        if [ -z "$GEMINI_API_KEY" ]; then
+            echo ""
+            print_warning "Credentials not configured yet!"
+            echo ""
+            echo "When the container starts, you need to authenticate:"
+            echo "  1. Run the command: ${GREEN}/login${NC}"
+            echo "  2. Follow the OAuth authentication flow in your browser"
+            echo ""
+            echo "Alternatively, set GEMINI_API_KEY environment variable for API key auth."
+            echo ""
+            echo "Starting Gemini agent..."
+            sleep 2
+        fi
+    fi
+}
+
+# Build Docker images if they don't exist
+build_images() {
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    local build_context=""
+
+    # Check if we're running from the repository (development mode)
+    if [ -f "$script_dir/gemini-cli/Dockerfile" ]; then
+        build_context="$script_dir"
+    fi
+
+    # Check for missing images
+    local missing_images=false
+
+    # Check main image
+    if ! docker image inspect "$GEMINI_IMAGE" &> /dev/null; then
+        # Try alternate naming without nezhar/ prefix
+        local alt_image="gemini-container:${VERSION}"
+        if docker image inspect "$alt_image" &> /dev/null; then
+            print_info "Found local image $alt_image, tagging as $GEMINI_IMAGE"
+            docker tag "$alt_image" "$GEMINI_IMAGE"
+        else
+            # Try with :latest tag as fallback
+            alt_image="gemini-container:latest"
+            if docker image inspect "$alt_image" &> /dev/null; then
+                print_info "Found local image $alt_image, tagging as $GEMINI_IMAGE"
+                docker tag "$alt_image" "$GEMINI_IMAGE"
+            elif [ -n "$build_context" ]; then
+                print_info "Building gemini-container image..."
+                docker build -t "$GEMINI_IMAGE" -t "nezhar/gemini-container:latest" "$build_context/gemini-cli"
+            else
+                print_info "Pulling gemini-container image from Docker Hub..."
+                if ! docker pull "$GEMINI_IMAGE" 2>/dev/null; then
+                    missing_images=true
+                    print_error "Image $GEMINI_IMAGE not found locally or on Docker Hub"
+                fi
+            fi
+        fi
+    fi
+
+    # Check proxy image
+    if [ "$USE_PROXY" = true ] && ! docker image inspect "$PROXY_IMAGE" &> /dev/null; then
+        local alt_image="gemini-proxy:${VERSION}"
+        if docker image inspect "$alt_image" &> /dev/null; then
+            print_info "Found local image $alt_image, tagging as $PROXY_IMAGE"
+            docker tag "$alt_image" "$PROXY_IMAGE"
+        else
+            alt_image="gemini-proxy:latest"
+            if docker image inspect "$alt_image" &> /dev/null; then
+                print_info "Found local image $alt_image, tagging as $PROXY_IMAGE"
+                docker tag "$alt_image" "$PROXY_IMAGE"
+            elif [ -n "$build_context" ]; then
+                print_info "Building gemini-proxy image..."
+                docker build -t "$PROXY_IMAGE" -t "nezhar/gemini-proxy:latest" "$build_context/gemini-proxy"
+            else
+                print_info "Pulling gemini-proxy image from Docker Hub..."
+                if ! docker pull "$PROXY_IMAGE" 2>/dev/null; then
+                    missing_images=true
+                    print_error "Image $PROXY_IMAGE not found locally or on Docker Hub"
+                fi
+            fi
+        fi
+    fi
+
+    # Check datasette image
+    if [ "$USE_DATASETTE" = true ] && ! docker image inspect "$DATASETTE_IMAGE" &> /dev/null; then
+        local alt_image="gemini-datasette:${VERSION}"
+        if docker image inspect "$alt_image" &> /dev/null; then
+            print_info "Found local image $alt_image, tagging as $DATASETTE_IMAGE"
+            docker tag "$alt_image" "$DATASETTE_IMAGE"
+        else
+            alt_image="gemini-datasette:latest"
+            if docker image inspect "$alt_image" &> /dev/null; then
+                print_info "Found local image $alt_image, tagging as $DATASETTE_IMAGE"
+                docker tag "$alt_image" "$DATASETTE_IMAGE"
+            elif [ -n "$build_context" ]; then
+                print_info "Building gemini-datasette image..."
+                docker build -t "$DATASETTE_IMAGE" -t "nezhar/gemini-datasette:latest" "$build_context/gemini-datasette"
+            else
+                print_info "Pulling gemini-datasette image from Docker Hub..."
+                if ! docker pull "$DATASETTE_IMAGE" 2>/dev/null; then
+                    missing_images=true
+                    print_error "Image $DATASETTE_IMAGE not found locally or on Docker Hub"
+                fi
+            fi
+        fi
+    fi
+
+    if [ "$missing_images" = true ]; then
+        print_error "Required Docker images are missing."
+        echo ""
+        echo "To build the images locally:"
+        echo "  1. cd /path/to/gemini-container"
+        echo "  2. docker compose build"
+        echo ""
+        echo "Or check existing images:"
+        echo "  docker images | grep gemini"
+        exit 1
+    fi
+}
+
+# Create network if it doesn't exist
+create_network() {
+    if ! docker network inspect "$NETWORK_NAME" &> /dev/null; then
+        print_info "Creating Docker network: $NETWORK_NAME"
+        docker network create "$NETWORK_NAME"
+    fi
+}
+
+# Start proxy container
+start_proxy() {
+    if docker ps -a --format '{{.Names}}' | grep -q "^${PROXY_CONTAINER_NAME}$"; then
+        if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_CONTAINER_NAME")" = "true" ]; then
+            print_info "Proxy container already running"
+            # Ensure certificate exists
+            wait_for_proxy_cert
+            return
+        else
+            print_info "Starting existing proxy container"
+            docker start "$PROXY_CONTAINER_NAME"
+            wait_for_proxy_cert
+            return
+        fi
+    fi
+
+    print_info "Starting proxy container on port $PROXY_PORT"
+    mkdir -p "$PROXY_DATA_DIR"
+
+    docker run -d \
+        --name "$PROXY_CONTAINER_NAME" \
+        --network "$NETWORK_NAME" \
+        -p "${PROXY_PORT}:8080" \
+        -v "$PROXY_DATA_DIR:/app" \
+        "$PROXY_IMAGE"
+
+    print_info "Proxy container started"
+
+    # Wait for proxy to initialize and generate certificate
+    wait_for_proxy_cert
+}
+
+# Wait for proxy certificate to be generated
+wait_for_proxy_cert() {
+    local cert_path="$PROXY_DATA_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
+    local max_wait=30
+    local waited=0
+
+    print_info "Waiting for proxy certificate generation..."
+
+    while [ ! -f "$cert_path" ] && [ $waited -lt $max_wait ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    if [ -f "$cert_path" ]; then
+        print_info "Proxy certificate ready"
+    else
+        print_error "Proxy certificate not generated after ${max_wait}s"
+        print_warning "Continuing anyway, but HTTPS interception may not work"
+    fi
+}
+
+# Start datasette container
+start_datasette() {
+    if docker ps -a --format '{{.Names}}' | grep -q "^${DATASETTE_CONTAINER_NAME}$"; then
+        if [ "$(docker inspect -f '{{.State.Running}}' "$DATASETTE_CONTAINER_NAME")" = "true" ]; then
+            print_info "Datasette container already running"
+            return
+        else
+            print_info "Starting existing datasette container"
+            docker start "$DATASETTE_CONTAINER_NAME"
+            return
+        fi
+    fi
+
+    print_info "Starting Datasette container on port $DATASETTE_PORT"
+    mkdir -p "$PROXY_DATA_DIR"
+
+    docker run -d \
+        --name "$DATASETTE_CONTAINER_NAME" \
+        --network "$NETWORK_NAME" \
+        -p "${DATASETTE_PORT}:8001" \
+        -v "$PROXY_DATA_DIR:/app" \
+        "$DATASETTE_IMAGE"
+
+    print_info "Datasette available at http://localhost:${DATASETTE_PORT}"
+}
+
+# Stop proxy container
+stop_proxy() {
+    if docker ps --format '{{.Names}}' | grep -q "^${PROXY_CONTAINER_NAME}$"; then
+        print_info "Stopping proxy container"
+        docker stop "$PROXY_CONTAINER_NAME" > /dev/null
+        docker rm "$PROXY_CONTAINER_NAME" > /dev/null
+    fi
+}
+
+# Stop datasette container
+stop_datasette() {
+    if docker ps --format '{{.Names}}' | grep -q "^${DATASETTE_CONTAINER_NAME}$"; then
+        print_info "Stopping datasette container"
+        docker stop "$DATASETTE_CONTAINER_NAME" > /dev/null
+        docker rm "$DATASETTE_CONTAINER_NAME" > /dev/null
+    fi
+}
+
+# Cleanup all containers and network
+cleanup() {
+    print_info "Cleaning up containers and network"
+    stop_proxy
+    stop_datasette
+
+    if docker network inspect "$NETWORK_NAME" &> /dev/null; then
+        docker network rm "$NETWORK_NAME" > /dev/null
+        print_info "Network removed"
+    fi
+}
+
+# Run Gemini container in agent mode
+run_gemini() {
+    local docker_args=()
+
+    # Add workspace mount
+    docker_args+=("-v" "${WORKSPACE_DIR}:/workspace")
+    docker_args+=("-w" "/workspace")
+
+    # Create and mount Gemini config directory
+    mkdir -p "$GEMINI_CONFIG_DIR"
+    docker_args+=("-v" "${GEMINI_CONFIG_DIR}:/root/.gemini")
+
+    # Add environment variables
+    if [ -n "$GEMINI_API_KEY" ]; then
+        docker_args+=("-e" "GEMINI_API_KEY=${GEMINI_API_KEY}")
+    fi
+
+    # Configure proxy if enabled
+    if [ "$USE_PROXY" = true ]; then
+        docker_args+=("--network" "$NETWORK_NAME")
+        docker_args+=("-e" "HTTPS_PROXY=http://${PROXY_CONTAINER_NAME}:8080")
+        docker_args+=("-v" "${PROXY_DATA_DIR}/.mitmproxy:/mitmproxy:ro")
+        docker_args+=("-e" "CURL_CA_BUNDLE=/mitmproxy/mitmproxy-ca-cert.pem")
+        docker_args+=("-e" "NODE_EXTRA_CA_CERTS=/mitmproxy/mitmproxy-ca-cert.pem")
+    fi
+
+    # Always run in interactive mode (agent mode)
+    docker_args+=("-it" "--rm")
+
+    # Run the container in agent mode (no additional arguments)
+    docker run "${docker_args[@]}" "$GEMINI_IMAGE"
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -v|--version)
+            show_version
+            exit 0
+            ;;
+        -w|--workspace)
+            WORKSPACE_DIR="$2"
+            shift 2
+            ;;
+        -c|--config)
+            CONFIG_DIR="$2"
+            shift 2
+            ;;
+        --proxy)
+            USE_PROXY=true
+            shift
+            ;;
+        --datasette)
+            USE_DATASETTE=true
+            USE_PROXY=true  # Datasette requires proxy
+            shift
+            ;;
+        --proxy-port)
+            PROXY_PORT="$2"
+            shift 2
+            ;;
+        --datasette-port)
+            DATASETTE_PORT="$2"
+            shift 2
+            ;;
+        --stop-proxy)
+            check_docker
+            stop_proxy
+            exit 0
+            ;;
+        --stop-datasette)
+            check_docker
+            stop_datasette
+            exit 0
+            ;;
+        --cleanup)
+            check_docker
+            cleanup
+            exit 0
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Main execution
+check_docker
+
+# Convert workspace to absolute path
+WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
+
+# Initialize credentials if needed
+initialize_credentials
+
+# Build images if needed
+build_images
+
+# Create network if using proxy
+if [ "$USE_PROXY" = true ]; then
+    create_network
+    start_proxy
+fi
+
+# Start datasette if requested
+if [ "$USE_DATASETTE" = true ]; then
+    start_datasette
+fi
+
+# Run Gemini CLI in agent mode
+run_gemini

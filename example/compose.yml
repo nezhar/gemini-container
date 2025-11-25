@@ -1,0 +1,43 @@
+services:
+  gemini-proxy:
+    image: nezhar/gemini-proxy:${GEMINI_CONTAINER_VERSION:-latest}
+    ports:
+      - "${PROXY_PORT:-8080}:8080"
+    volumes:
+      - gemini_data:/app
+    networks:
+      - gemini-network
+
+  gemini-datasette:
+    image: nezhar/gemini-datasette:${GEMINI_CONTAINER_VERSION:-latest}
+    ports:
+      - "${DATASETTE_PORT:-8001}:8001"
+    volumes:
+      - gemini_data:/app:ro
+    networks:
+      - gemini-network
+    depends_on:
+      - gemini-proxy
+
+  gemini-cli:
+    image: nezhar/gemini-container:${GEMINI_CONTAINER_VERSION:-latest}
+    environment:
+      - HTTPS_PROXY=http://gemini-proxy:8080
+      - CURL_CA_BUNDLE=/gemini/.mitmproxy/mitmproxy-ca-cert.pem
+      - NODE_EXTRA_CA_CERTS=/gemini/.mitmproxy/mitmproxy-ca-cert.pem
+    volumes:
+      - ${WORKSPACE_DIR:-.}:/workspace
+      - ${GEMINI_CONFIG_DIR:-~/.config/gemini-container}:/gemini
+      - gemini_data:/gemini/.mitmproxy:ro
+    working_dir: /workspace
+    networks:
+      - gemini-network
+    depends_on:
+      - gemini-proxy
+
+volumes:
+  gemini_data:
+
+networks:
+  gemini-network:
+    driver: bridge
