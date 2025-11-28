@@ -155,106 +155,6 @@ initialize_credentials() {
     fi
 }
 
-# Build Docker images if they don't exist
-build_images() {
-    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    local build_context=""
-
-    # Check if we're running from the repository (development mode)
-    if [ -f "$script_dir/gemini-cli/Dockerfile" ]; then
-        build_context="$script_dir"
-    fi
-
-    # Check for missing images
-    local missing_images=false
-
-    # Check main image
-    if ! docker image inspect "$GEMINI_IMAGE" &> /dev/null; then
-        # Try alternate naming without nezhar/ prefix
-        local alt_image="gemini-container:${VERSION}"
-        if docker image inspect "$alt_image" &> /dev/null; then
-            print_info "Found local image $alt_image, tagging as $GEMINI_IMAGE"
-            docker tag "$alt_image" "$GEMINI_IMAGE"
-        else
-            # Try with :latest tag as fallback
-            alt_image="gemini-container:latest"
-            if docker image inspect "$alt_image" &> /dev/null; then
-                print_info "Found local image $alt_image, tagging as $GEMINI_IMAGE"
-                docker tag "$alt_image" "$GEMINI_IMAGE"
-            elif [ -n "$build_context" ]; then
-                print_info "Building gemini-container image..."
-                docker build -t "$GEMINI_IMAGE" -t "nezhar/gemini-container:latest" "$build_context/gemini-cli"
-            else
-                print_info "Pulling gemini-container image from Docker Hub..."
-                if ! docker pull "$GEMINI_IMAGE" 2>/dev/null; then
-                    missing_images=true
-                    print_error "Image $GEMINI_IMAGE not found locally or on Docker Hub"
-                fi
-            fi
-        fi
-    fi
-
-    # Check proxy image
-    if [ "$USE_PROXY" = true ] && ! docker image inspect "$PROXY_IMAGE" &> /dev/null; then
-        local alt_image="gemini-proxy:${VERSION}"
-        if docker image inspect "$alt_image" &> /dev/null; then
-            print_info "Found local image $alt_image, tagging as $PROXY_IMAGE"
-            docker tag "$alt_image" "$PROXY_IMAGE"
-        else
-            alt_image="gemini-proxy:latest"
-            if docker image inspect "$alt_image" &> /dev/null; then
-                print_info "Found local image $alt_image, tagging as $PROXY_IMAGE"
-                docker tag "$alt_image" "$PROXY_IMAGE"
-            elif [ -n "$build_context" ]; then
-                print_info "Building gemini-proxy image..."
-                docker build -t "$PROXY_IMAGE" -t "nezhar/gemini-proxy:latest" "$build_context/gemini-proxy"
-            else
-                print_info "Pulling gemini-proxy image from Docker Hub..."
-                if ! docker pull "$PROXY_IMAGE" 2>/dev/null; then
-                    missing_images=true
-                    print_error "Image $PROXY_IMAGE not found locally or on Docker Hub"
-                fi
-            fi
-        fi
-    fi
-
-    # Check datasette image
-    if [ "$USE_DATASETTE" = true ] && ! docker image inspect "$DATASETTE_IMAGE" &> /dev/null; then
-        local alt_image="gemini-datasette:${VERSION}"
-        if docker image inspect "$alt_image" &> /dev/null; then
-            print_info "Found local image $alt_image, tagging as $DATASETTE_IMAGE"
-            docker tag "$alt_image" "$DATASETTE_IMAGE"
-        else
-            alt_image="gemini-datasette:latest"
-            if docker image inspect "$alt_image" &> /dev/null; then
-                print_info "Found local image $alt_image, tagging as $DATASETTE_IMAGE"
-                docker tag "$alt_image" "$DATASETTE_IMAGE"
-            elif [ -n "$build_context" ]; then
-                print_info "Building gemini-datasette image..."
-                docker build -t "$DATASETTE_IMAGE" -t "nezhar/gemini-datasette:latest" "$build_context/gemini-datasette"
-            else
-                print_info "Pulling gemini-datasette image from Docker Hub..."
-                if ! docker pull "$DATASETTE_IMAGE" 2>/dev/null; then
-                    missing_images=true
-                    print_error "Image $DATASETTE_IMAGE not found locally or on Docker Hub"
-                fi
-            fi
-        fi
-    fi
-
-    if [ "$missing_images" = true ]; then
-        print_error "Required Docker images are missing."
-        echo ""
-        echo "To build the images locally:"
-        echo "  1. cd /path/to/gemini-container"
-        echo "  2. docker compose build"
-        echo ""
-        echo "Or check existing images:"
-        echo "  docker images | grep gemini"
-        exit 1
-    fi
-}
-
 # Create network if it doesn't exist
 create_network() {
     if ! docker network inspect "$NETWORK_NAME" &> /dev/null; then
@@ -382,7 +282,7 @@ run_gemini() {
 
     # Create and mount Gemini config directory
     mkdir -p "$GEMINI_CONFIG_DIR"
-    docker_args+=("-v" "${GEMINI_CONFIG_DIR}:/root/.gemini")
+    docker_args+=("-v" "${GEMINI_CONFIG_DIR}:/home/node/.gemini")
 
     # Add environment variables
     if [ -n "$GEMINI_API_KEY" ]; then
@@ -402,7 +302,7 @@ run_gemini() {
     docker_args+=("-it" "--rm")
 
     # Run the container in agent mode (no additional arguments)
-    docker run "${docker_args[@]}" "$GEMINI_IMAGE"
+    docker run "${docker_args[@]}" "$GEMINI_IMAGE" gemini
 }
 
 # Parse command line arguments
@@ -472,9 +372,6 @@ WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
 # Initialize credentials if needed
 initialize_credentials
-
-# Build images if needed
-build_images
 
 # Create network if using proxy
 if [ "$USE_PROXY" = true ]; then

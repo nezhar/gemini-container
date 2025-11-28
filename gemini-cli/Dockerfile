@@ -19,4 +19,4 @@ WORKDIR /workspace
 # Set entrypoint
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-CMD ["sh", "-c", "echo 'Gemini CLI container is ready!'"]
+CMD ["gemini"]
