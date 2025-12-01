@@ -1,4 +1,18 @@
 services:
+  gemini-proxy:
+    image: nezhar/gemini-proxy:${GEMINI_CONTAINER_VERSION:-latest}
+    build:
+      context: ./gemini-proxy
+      dockerfile: Dockerfile
+
+  gemini-datasette:
+    image: nezhar/gemini-datasette:${GEMINI_CONTAINER_VERSION:-latest}
+    build:
+      context: ./gemini-datasette
+      dockerfile: Dockerfile
+
   gemini-cli:
-    build: .
-    image: gemini-container
+    image: nezhar/gemini-container:${GEMINI_CONTAINER_VERSION:-latest}
+    build:
+      context: ./gemini-cli
+      dockerfile: Dockerfile
