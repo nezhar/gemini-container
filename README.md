@@ -20,7 +20,7 @@ A containerized environment for running the Gemini CLI agent with optional API l
 Download and install the helper script:
 
 ```bash
-curl -o ~/.local/bin/gemini-container https://raw.githubusercontent.com/YOUR_USERNAME/gemini-container/main/bin/gemini-container
+curl -o ~/.local/bin/gemini-container https://raw.githubusercontent.com/nezhar/gemini-container/main/bin/gemini-container
 chmod +x ~/.local/bin/gemini-container
 ```
 
