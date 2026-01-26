@@ -1,14 +1,15 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
-WORKDIR /app
+RUN pip install --no-cache-dir mitmproxy
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN mkdir -p /proxy/logs /proxy/certs
 
-COPY proxy.py .
-COPY start.sh .
-RUN chmod +x start.sh
+COPY proxy_script.py /proxy/proxy_script.py
+COPY entrypoint.sh /proxy/entrypoint.sh
+RUN chmod +x /proxy/entrypoint.sh
+
+WORKDIR /proxy
 
 EXPOSE 8080
 
-CMD ["./start.sh"]
+ENTRYPOINT ["/proxy/entrypoint.sh"]

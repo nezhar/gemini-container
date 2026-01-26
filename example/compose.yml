@@ -4,7 +4,8 @@ services:
     ports:
       - "${PROXY_PORT:-8080}:8080"
     volumes:
-      - gemini_data:/app
+      - gemini_logs:/proxy/logs
+      - gemini_certs:/proxy/certs
     networks:
       - gemini-network
 
@@ -13,7 +14,7 @@ services:
     ports:
       - "${DATASETTE_PORT:-8001}:8001"
     volumes:
-      - gemini_data:/app:ro
+      - gemini_logs:/data:ro
     networks:
       - gemini-network
     depends_on:
@@ -22,13 +23,14 @@ services:
   gemini-cli:
     image: nezhar/gemini-container:${GEMINI_CONTAINER_VERSION:-latest}
     environment:
+      - HTTP_PROXY=http://gemini-proxy:8080
       - HTTPS_PROXY=http://gemini-proxy:8080
-      - CURL_CA_BUNDLE=/gemini/.mitmproxy/mitmproxy-ca-cert.pem
-      - NODE_EXTRA_CA_CERTS=/gemini/.mitmproxy/mitmproxy-ca-cert.pem
+      - CURL_CA_BUNDLE=/mitmproxy/mitmproxy-ca-cert.pem
+      - NODE_EXTRA_CA_CERTS=/mitmproxy/mitmproxy-ca-cert.pem
     volumes:
       - ${WORKSPACE_DIR:-.}:/workspace
       - ${GEMINI_CONFIG_DIR:-~/.config/gemini-container}:/gemini
-      - gemini_data:/gemini/.mitmproxy:ro
+      - gemini_certs:/mitmproxy:ro
     working_dir: /workspace
     networks:
       - gemini-network
@@ -36,7 +38,8 @@ services:
       - gemini-proxy
 
 volumes:
-  gemini_data:
+  gemini_logs:
+  gemini_certs:
 
 networks:
   gemini-network:
