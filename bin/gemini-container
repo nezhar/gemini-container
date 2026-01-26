@@ -5,7 +5,7 @@
 
 set -e
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 SCRIPT_NAME="gemini-container"
 
 # Default values
@@ -15,6 +15,7 @@ USE_PROXY=false
 USE_DATASETTE=false
 PROXY_PORT=8080
 DATASETTE_PORT=8001
+PROXY_MODE="forward"
 
 # Docker image names (using script version)
 GEMINI_IMAGE="nezhar/gemini-container:${VERSION}"
@@ -29,6 +30,7 @@ DATASETTE_CONTAINER_NAME="gemini-datasette"
 # Configuration subdirectories
 GEMINI_CONFIG_DIR="${CONFIG_DIR}/config"
 PROXY_DATA_DIR="${CONFIG_DIR}/proxy"
+PROXY_CERTS_DIR="${PROXY_DATA_DIR}/certs"
 
 # Color codes for output
 GREEN='\033[0;32m'
@@ -180,13 +182,16 @@ start_proxy() {
     fi
 
     print_info "Starting proxy container on port $PROXY_PORT"
-    mkdir -p "$PROXY_DATA_DIR"
+    mkdir -p "$PROXY_DATA_DIR" "$PROXY_CERTS_DIR"
 
     docker run -d \
         --name "$PROXY_CONTAINER_NAME" \
         --network "$NETWORK_NAME" \
-        -p "${PROXY_PORT}:8080" \
-        -v "$PROXY_DATA_DIR:/app" \
+        -p "${PROXY_PORT}:${PROXY_PORT}" \
+        -v "$PROXY_DATA_DIR:/proxy/logs" \
+        -v "$PROXY_CERTS_DIR:/proxy/certs" \
+        -e "PROXY_MODE=${PROXY_MODE}" \
+        -e "PROXY_PORT=${PROXY_PORT}" \
         "$PROXY_IMAGE"
 
     print_info "Proxy container started"
@@ -197,18 +202,19 @@ start_proxy() {
 
 # Wait for proxy certificate to be generated
 wait_for_proxy_cert() {
-    local cert_path="$PROXY_DATA_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
+    local cert_path="$PROXY_CERTS_DIR/mitmproxy-ca-cert.pem"
+    local alt_cert_path="$PROXY_CERTS_DIR/mitmproxy-ca.pem"
     local max_wait=30
     local waited=0
 
     print_info "Waiting for proxy certificate generation..."
 
-    while [ ! -f "$cert_path" ] && [ $waited -lt $max_wait ]; do
+    while [ ! -f "$cert_path" ] && [ ! -f "$alt_cert_path" ] && [ $waited -lt $max_wait ]; do
         sleep 1
         waited=$((waited + 1))
     done
 
-    if [ -f "$cert_path" ]; then
+    if [ -f "$cert_path" ] || [ -f "$alt_cert_path" ]; then
         print_info "Proxy certificate ready"
     else
         print_error "Proxy certificate not generated after ${max_wait}s"
@@ -236,7 +242,7 @@ start_datasette() {
         --name "$DATASETTE_CONTAINER_NAME" \
         --network "$NETWORK_NAME" \
         -p "${DATASETTE_PORT}:8001" \
-        -v "$PROXY_DATA_DIR:/app" \
+        -v "$PROXY_DATA_DIR:/data" \
         "$DATASETTE_IMAGE"
 
     print_info "Datasette available at http://localhost:${DATASETTE_PORT}"
@@ -292,10 +298,18 @@ run_gemini() {
     # Configure proxy if enabled
     if [ "$USE_PROXY" = true ]; then
         docker_args+=("--network" "$NETWORK_NAME")
-        docker_args+=("-e" "HTTPS_PROXY=http://${PROXY_CONTAINER_NAME}:8080")
-        docker_args+=("-v" "${PROXY_DATA_DIR}/.mitmproxy:/mitmproxy:ro")
-        docker_args+=("-e" "CURL_CA_BUNDLE=/mitmproxy/mitmproxy-ca-cert.pem")
-        docker_args+=("-e" "NODE_EXTRA_CA_CERTS=/mitmproxy/mitmproxy-ca-cert.pem")
+        docker_args+=("-e" "HTTP_PROXY=http://${PROXY_CONTAINER_NAME}:${PROXY_PORT}")
+        docker_args+=("-e" "HTTPS_PROXY=http://${PROXY_CONTAINER_NAME}:${PROXY_PORT}")
+        docker_args+=("-v" "${PROXY_CERTS_DIR}:/mitmproxy:ro")
+        if [ -f "${PROXY_CERTS_DIR}/mitmproxy-ca-cert.pem" ]; then
+            docker_args+=("-e" "CURL_CA_BUNDLE=/mitmproxy/mitmproxy-ca-cert.pem")
+            docker_args+=("-e" "NODE_EXTRA_CA_CERTS=/mitmproxy/mitmproxy-ca-cert.pem")
+        elif [ -f "${PROXY_CERTS_DIR}/mitmproxy-ca.pem" ]; then
+            docker_args+=("-e" "CURL_CA_BUNDLE=/mitmproxy/mitmproxy-ca.pem")
+            docker_args+=("-e" "NODE_EXTRA_CA_CERTS=/mitmproxy/mitmproxy-ca.pem")
+        else
+            print_warning "mitmproxy CA cert not found yet in ${PROXY_CERTS_DIR}"
+        fi
     fi
 
     # Always run in interactive mode (agent mode)

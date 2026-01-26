@@ -83,9 +83,8 @@ gemini-container/
 │   └── Dockerfile                # Main Gemini CLI container
 ├── gemini-proxy/
 │   ├── Dockerfile                # Proxy container
-│   ├── proxy.py                  # mitmproxy script
-│   ├── start.sh                  # Proxy startup script
-│   └── requirements.txt          # Python dependencies
+│   ├── proxy_script.py           # mitmproxy script
+│   └── entrypoint.sh             # Proxy startup script
 ├── gemini-datasette/
 │   ├── Dockerfile                # Datasette container
 │   └── requirements.txt          # Python dependencies
@@ -105,8 +104,9 @@ After running gemini-container, your configuration will be organized as follows:
 │   ├── google_accounts.json     # OAuth credentials
 │   └── settings.json             # Gemini CLI settings
 └── proxy/                        # Proxy data (when --proxy is used)
-    ├── .mitmproxy/               # mitmproxy certificates
-    │   └── mitmproxy-ca-cert.pem # Proxy CA certificate
+    ├── certs/                    # mitmproxy certificates
+    │   ├── mitmproxy-ca-cert.pem # Proxy CA certificate (alt)
+    │   └── mitmproxy-ca.pem      # Proxy CA certificate
     └── logs.db                   # API request logs (SQLite database)
 ```
 
@@ -278,19 +278,19 @@ Node.js 22 Alpine container running the official `@google/gemini-cli` npm packag
 - **Base:** node:22-alpine
 - **Working Directory:** /workspace (mapped to current directory or custom workspace)
 - **Credentials:** /root/.gemini (mapped to `~/.config/gemini-container/config`)
-- **Proxy Certs:** /mitmproxy (mapped to `~/.config/gemini-container/proxy` when proxy is enabled)
+- **Proxy Certs:** /mitmproxy (mapped to `~/.config/gemini-container/proxy/certs` when proxy is enabled)
 
 ### 2. nezhar/gemini-proxy (gemini-proxy/)
 
-Python 3.11 Slim container with mitmproxy that intercepts HTTPS requests to `generativelanguage.googleapis.com` and logs:
+Python 3.12 Slim container with mitmproxy that intercepts HTTPS requests and logs:
 - Request URL, method, headers, and body
 - Response status code, headers, and body
 
 Data is stored in a SQLite database (`logs.db`) at `~/.config/gemini-container/proxy` on the host, shared with the Datasette service.
 
-- **Base:** python:3.11-slim
+- **Base:** python:3.12-slim
 - **Port:** 8080
-- **Data Directory:** /app (mapped to `~/.config/gemini-container/proxy`)
+- **Data Directory:** /proxy/logs (mapped to `~/.config/gemini-container/proxy`)
 
 ### 3. nezhar/gemini-datasette (gemini-datasette/)
 
@@ -298,7 +298,7 @@ Python 3.11 Slim container with Datasette for exploring the logged API requests.
 
 - **Base:** python:3.11-slim
 - **Port:** 8001
-- **Data Directory:** /app
+- **Data Directory:** /data
 
 ## Troubleshooting
 
@@ -336,13 +336,13 @@ If you see SSL/TLS errors when using `--proxy`:
 2. **Stale certificate**: Clean up and regenerate:
    ```bash
    gemini-container --cleanup
-   rm -rf ~/.config/gemini-container/proxy/.mitmproxy
+   rm -rf ~/.config/gemini-container/proxy/certs
    # Then run again with --proxy
    ```
 
 3. **Check certificate exists**:
    ```bash
-   ls -la ~/.config/gemini-container/proxy/.mitmproxy/mitmproxy-ca-cert.pem
+   ls -la ~/.config/gemini-container/proxy/certs/mitmproxy-ca-cert.pem
    ```
 
 4. **Check proxy logs**:
